@@ -463,26 +463,32 @@ impl Backend for WebGpu {
 
 impl Encoder<WebGpu> for wgpu::CommandEncoder {
     fn begin_pass(&mut self, label: &str, timestamps: Option<&mut GpuTimestamps>) -> ComputePass<'static> {
+        // Record timestamps only while the query set has room for another pass (a
+        // begin and an end query). A query set is capped at QUERY_SET_MAX_QUERIES and
+        // cannot be grown, and wgpu rejects an out-of-bounds query index by failing
+        // the whole submission, so recording past capacity would panic the caller.
+        // Once the set is full we fall back to an untimed pass instead.
         if let Some(ts) = timestamps {
-            let begin = ts.next_query_index;
-            let end = begin + 1;
-            ts.next_query_index += 2;
-            ts.labels.push(label.to_string());
-            let ts_writes = ComputePassTimestampWrites {
-                query_set: &ts.query_set,
-                beginning_of_pass_write_index: Some(begin),
-                end_of_pass_write_index: Some(end),
-            };
-            self.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: Some(ts_writes),
-            }).forget_lifetime()
-        } else {
-            self.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: None,
-            }).forget_lifetime()
+            if ts.num_recorded_passes() < ts.capacity {
+                let begin = ts.next_query_index;
+                let end = begin + 1;
+                ts.next_query_index += 2;
+                ts.labels.push(label.to_string());
+                let ts_writes = ComputePassTimestampWrites {
+                    query_set: &ts.query_set,
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(end),
+                };
+                return self.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some(label),
+                    timestamp_writes: Some(ts_writes),
+                }).forget_lifetime();
+            }
         }
+        self.begin_compute_pass(&ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        }).forget_lifetime()
     }
 
     fn copy_buffer_to_buffer<T: DeviceValue + NoUninit>(
